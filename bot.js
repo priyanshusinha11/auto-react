@@ -3,26 +3,45 @@ const TelegramBot = require('node-telegram-bot-api');
 
 class TelegramChannelBot {
     constructor(config) {
-        this.tokens = config.tokens;
-        this.channelIds = config.channelIds;
+        this.tokens = this.parseTokens(config.botTokens);
+        this.channelIds = this.parseChannelIds(config.channelIds);
         this.reactions = config.reactions || ['👍', '❤️', '🔥', '🎉', '👏'];
         this.bots = new Map();
         this.initializeBots();
     }
 
+    parseTokens(tokenString) {
+        if (!tokenString) {
+            throw new Error('Bot tokens are required');
+        }
+        return tokenString.split(',').map(token => token.trim()).filter(token => token);
+    }
+
+    parseChannelIds(channelString) {
+        if (!channelString) {
+            throw new Error('Channel IDs are required');
+        }
+        return channelString.split(',').map(id => id.trim()).filter(id => id);
+    }
+
     initializeBots() {
         this.tokens.forEach((token, index) => {
-            const bot = new TelegramBot(token, {
-                polling: {
-                    params: {
-                        timeout: 50,
-                        allowed_updates: ['channel_post']
+            try {
+                const bot = new TelegramBot(token, {
+                    polling: {
+                        params: {
+                            timeout: 50,
+                            allowed_updates: ['channel_post']
+                        }
                     }
-                }
-            });
+                });
 
-            this.setupEventHandlers(bot, token);
-            this.bots.set(token, bot);
+                this.setupEventHandlers(bot, token);
+                this.bots.set(token, bot);
+                console.log(`Bot ${index + 1} (${this.maskToken(token)}) initialized successfully`);
+            } catch (error) {
+                console.error(`Failed to initialize bot ${index + 1} (${this.maskToken(token)}):`, error.message);
+            }
         });
     }
 
@@ -39,7 +58,10 @@ class TelegramChannelBot {
         });
 
         bot.on('polling_error', (error) => {
-            if (error.message.includes('ETELEGRAM: 409 Conflict')) {
+            if (error.code === 401) {
+                console.error(`Bot ${this.maskToken(token)} is unauthorized. Please check the token.`);
+                this.removeBot(token);
+            } else if (error.message.includes('ETELEGRAM: 409 Conflict')) {
                 this.handlePollingConflict(bot, token);
             } else {
                 console.error(`Bot ${this.maskToken(token)} polling error:`, error.message);
@@ -47,17 +69,23 @@ class TelegramChannelBot {
         });
     }
 
+    removeBot(token) {
+        const bot = this.bots.get(token);
+        if (bot) {
+            bot.stopPolling();
+            this.bots.delete(token);
+            console.log(`Bot ${this.maskToken(token)} has been removed due to authorization failure`);
+        }
+    }
+
     async handlePollingConflict(bot, token) {
         try {
-           
             await bot.stopPolling();
             console.log(`Bot ${this.maskToken(token)} stopped polling due to conflict`);
 
-           
             const delay = Math.floor(Math.random() * 5000) + 2000;
             await new Promise(resolve => setTimeout(resolve, delay));
 
-           
             await bot.startPolling({
                 restart: true,
                 polling_options: {
@@ -87,18 +115,30 @@ class TelegramChannelBot {
         };
 
         try {
-            await bot.setMessageReaction(reaction);
+            // First attempt using raw API request
+            await bot._request('setMessageReaction', {
+                form: {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    reaction: JSON.stringify(reaction.reaction)
+                }
+            });
             console.log(`Bot ${this.maskToken(token)} added reaction to message ${messageId} in ${msg.chat.title}`);
         } catch (error) {
             console.error(`Bot ${this.maskToken(token)} reaction error:`, error.message);
 
-           
+            // If the first attempt fails, try with a delay and different format
             try {
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 await bot._request('setMessageReaction', {
+                    json: true,
                     form: {
-                        ...reaction,
-                        reaction: JSON.stringify(reaction.reaction)
+                        chat_id: chatId,
+                        message_id: messageId,
+                        reaction: JSON.stringify([{
+                            type: 'emoji',
+                            emoji: this.getRandomReaction()
+                        }])
                     }
                 });
                 console.log(`Bot ${this.maskToken(token)} added reaction (retry) to message ${messageId}`);
@@ -134,22 +174,18 @@ class TelegramChannelBot {
     shutdown() {
         this.bots.forEach(bot => bot.stopPolling());
     }
+
+    getActiveBotCount() {
+        return this.bots.size;
+    }
 }
 
-
 const config = {
-    tokens: [
-        process.env.TELEGRAM_BOT_TOKEN,
-        process.env.TELEGRAM_BOT_TOKEN2,
-        process.env.TELEGRAM_BOT_TOKEN3,
-        process.env.TELEGRAM_BOT_TOKEN4,
-        process.env.TELEGRAM_BOT_TOKEN5
-    ],
-    channelIds: process.env.CHANNEL_IDS.split(',')
+    botTokens: process.env.BOT_TOKENS,
+    channelIds: process.env.CHANNEL_IDS
 };
 
 const channelBot = new TelegramChannelBot(config);
-
 
 process.on('SIGINT', () => {
     console.log('Shutting down bots...');
@@ -163,4 +199,4 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
-console.log(`Running ${config.tokens.length} bots, monitoring ${config.channelIds.length} channels`);
+console.log(`Running ${channelBot.getActiveBotCount()} bots, monitoring ${channelBot.channelIds.length} channels`);
